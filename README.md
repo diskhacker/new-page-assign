@@ -1,43 +1,57 @@
-# Codebase Explorer — one-day assignment prototype
+# Code Documentation Assistant — assignment proof
 
-Standalone React UI and Node.js API for source-grounded code explanations. This is **not** a product or a VS Code extension.
+**Option 2** from the AI FDE assignment. Standalone React + TypeScript UI and Node.js backend. This is a proof-of-concept, not a production service.
 
-## Run
+## Setup and run
 
-Requirements: Node.js 20+ and npm. No database needed for the implemented slice.
+Node.js 20+ and npm required.
 
 ```sh
-# Terminal 1: from repository root
-REPO_ROOT="$PWD/server" node server/index.mjs
-# Terminal 2
-cd web && npm install && npm run dev
+cd server
+npm install
+npm start
 ```
 
-Open http://127.0.0.1:5173. Click **Index repository**, then ask a question. The default sample is the server source itself; set `REPO_ROOT` to an authorized local JS/TS project for another codebase. Do not point it at untrusted or sensitive source trees. Only local access is supported.
+In another terminal:
 
-Optional OpenAI-compatible LLM endpoint (server-side environment only): `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL`. Without it the app returns retrieval evidence, not a generated explanation. Never expose the key in frontend configuration.
+```sh
+cd web
+npm install
+npm run dev
+```
 
-## Implemented
+Open **http://127.0.0.1:5173**, upload a **ZIP of JS/TS source**, wait for indexing, and ask questions. The server accepts ZIPs up to 5 MiB compressed. It does not accept remote GitHub URLs. A new browser session starts with no codebase context.
 
-- Local JS/TS source scanning (file count and size bounds; symlinks skipped).
-- Lightweight symbols/import extraction and lexical evidence ranking.
-- Bounded context to optional LLM; server-supplied file/line citations.
-- Revision-scoped **exact** request-response cache (100 entries, 10-minute TTL, cleared on reindex).
-- React chat UI, status, error handling, source references.
-- Node test runner: `REPO_ROOT="$PWD/server" node --test server/index.test.mjs`.
+Optional LLM: set backend environment variables `LLM_BASE_URL` (OpenAI-compatible base ending in `/v1`), `LLM_API_KEY`, `LLM_MODEL`. Without these, the app returns relevant source references but not an AI explanation. Never put credentials in `web/`.
 
-## Not implemented
+## Core implemented
 
-Graph DB, vector DB, embeddings, semantic similarity cache, MCP integration, full CodeSight graph reuse, commit-based indexing, multi-user authorization, production observability, and robust semantic citation verification. See [architecture](docs/ARCHITECTURE.md) for the intended design. This partial implementation must not be represented as having those features.
+- ZIP upload through React; bounded server-side decoding with fflate.
+- Session-scoped in-memory CodeGraph: symbols, imports and heuristic possible-call edges.
+- Lexical graph-assisted retrieval and server-generated file/line references.
+- Optional LLM explanation using bounded retrieved code context.
+- Session-local exact request-response cache (50 entries); idle expiry after 30 minutes.
+- End-session action discards indexed source, graph and cache; process restart also discards them.
 
-## Design tradeoffs
+## Final proof (execute before submitting)
 
-Lexical retrieval is a minimal executable slice and may miss conceptual matches. Regex extraction is not an AST and does not establish accurate call graphs. Cache key includes a hash of indexed source; it does not assert semantic equivalence. Source citations are selected from retrieved files, not invented by the LLM, but the explanation is not independently fact-checked. No untrusted remote repository cloning is provided.
+```sh
+cd server && npm test
+cd ../web && npm run build
+```
 
-## Productionization
+Manual proof: upload sample ZIP; ask a symbol question; repeat to observe cache hit; end session; verify chat is disabled until another upload. **Tests/build are not claimed as passed until executed.**
 
-Use a real parser and graph index, embedding search, version-aware semantic cache with evidence validation, repository-level authz, job isolation, incremental indexing, structured logs, tracing, request quotas and citation checks. Evaluate these before adopting additional services.
+## Architecture, tradeoffs and productionization
 
-## AI-assisted development
+See [deep architecture and Mermaid diagrams](docs/IMPLEMENTATION-AND-DESIGN.md). Earlier [architecture proposal](docs/ARCHITECTURE.md) describes the planned hybrid vector/graph/semantic-cache direction, **not** the implemented proof. The proof uses an in-memory graph and exact cache. No vector DB, graph DB, embeddings, MCP or true semantic cache exists in runtime.
 
-Architecture and implementation drafted with AI assistance; tests must be executed and reported separately. AI output is not proof of correctness.
+The intended future architecture includes AST CodeGraph indexing, hybrid graph/vector retrieval, versioned semantic cache, authz, sandboxed ZIP processing, observability, managed queues and cloud deployment. These are design-only, not hidden dependencies.
+
+## Engineering standards and omissions
+
+One session owns source, graph and cached answers. Backend validates archive limits and owns citations. The prototype binds to loopback; no persistent code storage. Skipped full parser correctness, auth, worker isolation and deployment because the assignment prioritizes an end-to-end working slice. ZIP source may contain prompt injection; do not upload secrets. A generated explanation is not independently verified against source semantics.
+
+## AI tool usage
+
+AI assistance was used to draft code and architecture. Review the code and run final proof tests before treating the result as correct. Record screenshots from a real running browser, not mockups. The engineering decisions and tradeoffs should be checked and adapted by the submitter rather than presented as independently validated.
