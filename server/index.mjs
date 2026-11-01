@@ -108,6 +108,10 @@ export async function handler(req,res){
    sessions.set(id,{graph,cache:new Map(),expires:Date.now()+TTL});
    return send(res,200,{sessionId:id,filesIndexed:graph.docs.length,symbolsIndexed:graph.symbols.length,edgesIndexed:graph.edges.length,ttlSeconds:TTL/1000});
   }
+  if(req.method==='GET'&&req.url==='/api/graph'){
+   const s=getSession(req);
+   return send(res,200,{files:s.graph.docs.map(d=>d.path),symbols:s.graph.symbols.slice(0,200),edges:s.graph.edges.slice(0,300)});
+  }
   if(req.method==='POST'&&req.url==='/api/chat'){
    const s=getSession(req);const data=JSON.parse((await readBody(req,4096)).toString('utf8'));
    return send(res,200,await ask(s,data.question));
