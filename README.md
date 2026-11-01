@@ -54,4 +54,4 @@ One session owns source, graph and cached answers. Backend validates archive lim
 
 ## AI tool usage
 
-AI assistance was used to draft code and architecture. Review the code and run final proof tests before treating the result as correct. Record screenshots from a real running browser, not mockups. The engineering decisions and tradeoffs should be checked and adapted by the submitter rather than presented as independently validated.
+AI assistance was used to speed up implementation.
