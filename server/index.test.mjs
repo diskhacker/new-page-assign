@@ -18,3 +18,26 @@ test('FINAL PROOF: unsupported question has no invented citations',async()=>{
  const result=await ask(session,'zzzzzzzzuniqueunknown');
  assert.equal(result.citations.length,0);
 });
+
+import http from 'node:http';
+import {once} from 'node:events';
+test('FINAL PROOF: HTTP upload -> ask -> cache hit -> end -> rejected',async()=>{
+ const server=http.createServer(handler);
+ server.listen(0,'127.0.0.1');
+ await once(server,'listening');
+ const base='http://127.0.0.1:'+server.address().port;
+ const archive=zip({'src/example.ts':'export function greet() { return "hello"; }'});
+ try {
+  const uploaded=await fetch(base+'/api/session/upload',{method:'POST',headers:{'content-type':'application/zip'},body:Buffer.from(archive)});
+  assert.equal(uploaded.status,200);
+  const {sessionId,filesIndexed}=await uploaded.json();
+  assert.equal(filesIndexed,1);assert.ok(sessionId);
+  const send=()=>fetch(base+'/api/chat',{method:'POST',headers:{'content-type':'application/json','x-session-id':sessionId},body:JSON.stringify({question:'greet'})});
+  const first=await send();assert.equal(first.status,200);assert.equal((await first.json()).cache,'miss');
+  const second=await send();assert.equal(second.status,200);assert.equal((await second.json()).cache,'hit');
+  const deleted=await fetch(base+'/api/session',{method:'DELETE',headers:{'x-session-id':sessionId}});
+  assert.equal(deleted.status,200);
+  const after=await send();assert.equal(after.status,400);
+  assert.match((await after.json()).error,/Session missing or expired/);
+ }finally{server.close();await once(server,'close')}
+});
