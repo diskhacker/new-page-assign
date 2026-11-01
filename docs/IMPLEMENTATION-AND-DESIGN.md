@@ -151,3 +151,11 @@ flowchart LR
 **Verification contract:** The final proof must demonstrate ZIP upload, symbol and relationship extraction, source-grounded chat, repeat-request cache hit, explicit session deletion and rejection of the old session. The CI job tests the HTTP lifecycle without requiring an external model. A separate manual demo must prove that an actual LLM explanation works if an LLM is configured.
 
 **Tradeoff:** This remains heuristic extraction. Accurate cross-file call resolution, AST traversal, graph traversal ranking, embeddings and semantic cache are outside this increment. Reusing an existing CodeSight parser remains a future evaluation, not a claim of implemented integration.
+
+## 12. Final UAT hardening
+
+The final-readiness increment rejects invalid ZIP signatures before decompression, checks expanded source-file size after decoding, ignores unsupported ZIP entries during indexing, rejects cross-origin browser requests and verifies session isolation with an HTTP proof. These are local-demo safeguards, not a substitute for sandboxing untrusted archives.
+
+Browser origin checking does not authenticate non-browser callers; session tokens remain bearer capabilities. The ZIP decoder still performs synchronous work on the Node event loop and should not be exposed as a public upload endpoint. No persistent code memory is introduced.
+
+The final proof suite additionally covers invalid ZIP signatures, forbidden origins and two simultaneous sessions with distinct CodeGraphs. Manual UAT remains necessary; see `docs/UAT-CHECKLIST.md`. If CI is green, the remaining user acceptance step is to verify the actual React flow and optional LLM response.
