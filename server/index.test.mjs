@@ -41,3 +41,33 @@ test('FINAL PROOF: HTTP upload -> ask -> cache hit -> end -> rejected',async()=>
   assert.match((await after.json()).error,/Session missing or expired/);
  }finally{server.close();await once(server,'close')}
 });
+
+test('FINAL PROOF: invalid ZIP signature rejected via HTTP',async()=>{
+ const server=http.createServer(handler);server.listen(0,'127.0.0.1');await once(server,'listening');
+ try{
+  const response=await fetch('http://127.0.0.1:'+server.address().port+'/api/session/upload',{method:'POST',headers:{'content-type':'application/zip'},body:Buffer.from('not an archive')});
+  assert.equal(response.status,400);assert.match((await response.json()).error,/Invalid ZIP signature/);
+ }finally{server.close();await once(server,'close')}
+});
+test('FINAL PROOF: cross-origin browser requests denied',async()=>{
+ const server=http.createServer(handler);server.listen(0,'127.0.0.1');await once(server,'listening');
+ try{
+  const response=await fetch('http://127.0.0.1:'+server.address().port+'/api/health',{headers:{origin:'https://untrusted.example'}});
+  assert.equal(response.status,403);
+ }finally{server.close();await once(server,'close')}
+});
+test('FINAL PROOF: separate uploaded sessions never share CodeGraph',async()=>{
+ const server=http.createServer(handler);server.listen(0,'127.0.0.1');await once(server,'listening');
+ const base='http://127.0.0.1:'+server.address().port;
+ const upload=async (name)=>{const r=await fetch(base+'/api/session/upload',{method:'POST',headers:{'content-type':'application/zip'},body:Buffer.from(zip({['src/'+name+'.ts']:'export function '+name+'() { return 1; }'}))});assert.equal(r.status,200);return (await r.json()).sessionId};
+ try{
+  const a=await upload('firstUniqueSymbol');const b=await upload('secondUniqueSymbol');
+  const get=async id=>{const r=await fetch(base+'/api/graph',{headers:{'x-session-id':id}});assert.equal(r.status,200);return r.json()};
+  const first=await get(a),second=await get(b);
+  assert.ok(first.symbols.some(s=>s.name==='firstUniqueSymbol'));
+  assert.ok(!second.symbols.some(s=>s.name==='firstUniqueSymbol'));
+  assert.ok(second.symbols.some(s=>s.name==='secondUniqueSymbol'));
+  await fetch(base+'/api/session',{method:'DELETE',headers:{'x-session-id':a}});
+  await fetch(base+'/api/session',{method:'DELETE',headers:{'x-session-id':b}});
+ }finally{server.close();await once(server,'close')}
+});

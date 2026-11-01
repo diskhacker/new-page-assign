@@ -1,5 +1,5 @@
 import http from 'node:http';
-import {randomUUID,createHash} from 'node:crypto';
+import {randomUUID} from 'node:crypto';
 import {unzipSync,strFromU8} from 'fflate';
 const port=Number(process.env.PORT||3001);
 const MAX_ZIP=5*1024*1024,MAX_TOTAL=15*1024*1024,MAX_FILES=200,MAX_FILE=150000;
@@ -17,10 +17,11 @@ export function parseArchive(bytes){
    if(!validatePath(e.name))throw Error('Unsafe archive path');
    if(e.name.endsWith('/'))return false;
    if(++count>MAX_FILES)throw Error('Too many archive entries');
+   if(!allowed.test(e.name)||ignored.test(e.name))return false;
    if(e.originalSize>MAX_FILE || (total+=e.originalSize)>MAX_TOTAL)throw Error('Archive exceeds expanded size limit');
-   return allowed.test(e.name)&&!ignored.test(e.name);
+   return true;
  }});
- const files=Object.entries(archive).map(([name,data])=>({path:name,source:strFromU8(data)}));
+ const files=Object.entries(archive).map(([name,data])=>{if(data.length>MAX_FILE)throw Error('File exceeds size limit');return {path:name,source:strFromU8(data)};});
  if(!files.length)throw Error('No supported JS/TS files in archive');
  return files;
 }
@@ -92,7 +93,11 @@ function getSession(req){
  s.expires=Date.now()+TTL;return s;
 }
 export async function handler(req,res){
- res.setHeader('access-control-allow-origin',process.env.UI_ORIGIN||'http://127.0.0.1:5173');
+ const allowedOrigin=process.env.UI_ORIGIN||'http://127.0.0.1:5173';
+ const origin=req.headers.origin;
+ if(origin&&origin!==allowedOrigin)return send(res,403,{error:'Origin not allowed'});
+ res.setHeader('access-control-allow-origin',allowedOrigin);
+ res.setHeader('vary','Origin');
  res.setHeader('access-control-allow-headers','content-type,x-session-id');
  res.setHeader('access-control-allow-methods','GET,POST,DELETE,OPTIONS');
  if(req.method==='OPTIONS')return send(res,200,{});
@@ -103,6 +108,7 @@ export async function handler(req,res){
    if(sessions.size>=MAX_SESSIONS)throw Error('Session capacity reached');
    if(req.headers['content-type']!=='application/zip')throw Error('Expected application/zip');
    const bytes=await readBody(req,MAX_ZIP);
+   if(bytes.length<4||bytes[0]!==80||bytes[1]!==75)throw Error('Invalid ZIP signature');
    const files=parseArchive(bytes),graph=buildGraph(files);
    const id=randomUUID()+randomUUID();
    sessions.set(id,{graph,cache:new Map(),expires:Date.now()+TTL});
@@ -114,6 +120,7 @@ export async function handler(req,res){
   }
   if(req.method==='POST'&&req.url==='/api/chat'){
    const s=getSession(req);const data=JSON.parse((await readBody(req,4096)).toString('utf8'));
+   if(!data||typeof data!=='object')throw Error('Invalid request body');
    return send(res,200,await ask(s,data.question));
   }
   if(req.method==='DELETE'&&req.url==='/api/session'){
