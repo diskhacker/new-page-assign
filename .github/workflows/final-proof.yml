@@ -1,0 +1,39 @@
+name: Assignment final proof
+
+on:
+  push:
+    branches: [main, feat/ci-final-proof]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install server dependencies
+        run: npm install --no-audit --no-fund
+        working-directory: server
+      - name: Check server syntax
+        run: |
+          node --check index.mjs
+          node --check index.test.mjs
+        working-directory: server
+      - name: Final backend proof
+        run: npm test
+        working-directory: server
+      - name: Install frontend dependencies
+        run: npm install --no-audit --no-fund
+        working-directory: web
+      - name: Check frontend build
+        run: npm run build
+        working-directory: web

@@ -1,95 +1,126 @@
 import http from 'node:http';
-import fs from 'node:fs/promises';
-import path from 'node:path';
-import { createHash } from 'node:crypto';
-
-const root = path.resolve(process.env.REPO_ROOT || process.cwd());
-const port = Number(process.env.PORT || 3001);
-const MAX_FILES = 300, MAX_BYTES = 100_000, MAX_CONTEXT = 12000;
-const allowed = new Set(['.js','.jsx','.ts','.tsx','.mjs','.cjs']);
-const ignored = new Set(['node_modules','.git','dist','build','coverage','.next']);
-let index = null;
-const cache = new Map();
-const hash = x => createHash('sha256').update(x).digest('hex');
-const words = s => [...new Set((s.toLowerCase().match(/[a-z_][a-z_0-9]*/g) || []).filter(x => x.length > 2))];
-
-async function collect(dir, output=[]) {
-  for (const entry of await fs.readdir(dir,{withFileTypes:true})) {
-    if (output.length >= MAX_FILES) break;
-    if (entry.isSymbolicLink() || ignored.has(entry.name)) continue;
-    const absolute = path.join(dir,entry.name);
-    if (entry.isDirectory()) await collect(absolute,output);
-    else if (entry.isFile() && allowed.has(path.extname(entry.name))) {
-      const stat = await fs.stat(absolute);
-      if (stat.size <= MAX_BYTES) output.push(absolute);
-    }
+import {randomUUID,createHash} from 'node:crypto';
+import {unzipSync,strFromU8} from 'fflate';
+const port=Number(process.env.PORT||3001);
+const MAX_ZIP=5*1024*1024,MAX_TOTAL=15*1024*1024,MAX_FILES=200,MAX_FILE=150000;
+const TTL=30*60*1000,MAX_SESSIONS=10;
+const sessions=new Map();
+const allowed=/\.(?:js|jsx|ts|tsx|mjs|cjs)$/i;
+const ignored=/(^|\/)(?:node_modules|\.git|dist|build|coverage)(\/|$)/;
+const tokens=s=>[...new Set((s.toLowerCase().match(/[a-z_$][\w$]{2,}/g)||[]))];
+const clean=()=>{for(const [id,s] of sessions)if(s.expires<Date.now())sessions.delete(id)};
+const timer=setInterval(clean,60000);timer.unref();
+function validatePath(p){return p&&!p.startsWith('/')&&!p.includes('\\')&&!p.split('/').some(x=>x==='..'||x==='.')&&!/^[A-Za-z]:/.test(p)}
+export function parseArchive(bytes){
+ let total=0,count=0;
+ const archive=unzipSync(bytes,{filter:e=>{
+   if(!validatePath(e.name))throw Error('Unsafe archive path');
+   if(e.name.endsWith('/'))return false;
+   if(++count>MAX_FILES)throw Error('Too many archive entries');
+   if(e.originalSize>MAX_FILE || (total+=e.originalSize)>MAX_TOTAL)throw Error('Archive exceeds expanded size limit');
+   return allowed.test(e.name)&&!ignored.test(e.name);
+ }});
+ const files=Object.entries(archive).map(([name,data])=>({path:name,source:strFromU8(data)}));
+ if(!files.length)throw Error('No supported JS/TS files in archive');
+ return files;
+}
+export function buildGraph(files){
+ const symbols=[],edges=[],docs=[];
+ for(const file of files){
+   const lines=file.source.split('\n');
+   const local=[];
+   for(let i=0;i<lines.length;i++){
+     const m=lines[i].match(/\b(?:function|class|interface|type|const|let|var)\s+([\w$]+)/);
+     if(m){const symbol={id:file.path+':'+(i+1),name:m[1],path:file.path,line:i+1};symbols.push(symbol);local.push(symbol)}
+   }
+   docs.push({path:file.path,lines,source:file.source,local});
+ }
+ const byName=new Map();for(const s of symbols){const arr=byName.get(s.name)||[];arr.push(s);byName.set(s.name,arr)}
+ for(const doc of docs){
+   for(let i=0;i<doc.lines.length;i++){
+     const line=doc.lines[i];
+     for(const m of line.matchAll(/\b([A-Za-z_$][\w$]*)\s*\(/g)){
+       const matches=byName.get(m[1])||[];
+       if(matches.length===1 && matches[0].path===doc.path && matches[0].line!==i+1)
+         edges.push({type:'possible-call',from:doc.path+':'+(i+1),to:matches[0].id});
+     }
+     const imp=line.match(/\bfrom\s+['"]([^'"]+)['"]/);
+     if(imp)edges.push({type:'import',from:doc.path,to:imp[1]});
+   }
+ }
+ return {docs,symbols,edges};
+}
+export function retrieve(graph,question){
+ const terms=tokens(question);
+ return graph.docs.map(d=>{
+   const matches=d.local.filter(s=>terms.includes(s.name.toLowerCase()));
+   const ranked=d.lines.map((line,i)=>({line:i+1,score:terms.filter(t=>line.toLowerCase().includes(t)).length})).filter(x=>x.score>0).sort((a,b)=>b.score-a.score);
+   const score=matches.length*8+ranked.slice(0,8).reduce((n,x)=>n+x.score,0)+terms.filter(t=>d.path.toLowerCase().includes(t)).length*3;
+   const focus=matches[0]?.line||ranked[0]?.line||1;
+   const start=Math.max(1,focus-4),end=Math.min(d.lines.length,focus+12);
+   return {path:d.path,start,end,score,source:d.lines.slice(start-1,end).map((line,i)=>`${start+i}: ${line}`).join('\n')};
+ }).filter(x=>x.score>0).sort((a,b)=>b.score-a.score).slice(0,4);
+}
+async function explain(question,evidence){
+ if(!process.env.LLM_BASE_URL||!process.env.LLM_API_KEY||!process.env.LLM_MODEL)
+   return {answer:'LLM not configured. Relevant code evidence is listed below.',mode:'retrieval-only'};
+ const context=evidence.map(e=>`${e.path} [${e.start}-${e.end}]\n${e.source}`).join('\n\n').slice(0,10000);
+ const res=await fetch(process.env.LLM_BASE_URL.replace(/\/$/,'')+'/chat/completions',{method:'POST',headers:{'content-type':'application/json',authorization:'Bearer '+process.env.LLM_API_KEY},body:JSON.stringify({model:process.env.LLM_MODEL,temperature:0,max_tokens:500,messages:[{role:'system',content:'Explain only supported behavior from the supplied source. Do not invent paths, calls or facts. State uncertainty.'},{role:'user',content:question+'\n'+context}]}),signal:AbortSignal.timeout(20000)});
+ if(!res.ok)throw Error('LLM unavailable ('+res.status+')');
+ const data=await res.json();return {answer:data.choices?.[0]?.message?.content||'No answer returned.',mode:'llm'};
+}
+export async function ask(session,question){
+ if(typeof question!=='string'||!question.trim()||question.length>1000)throw Error('Question must be 1-1000 characters');
+ const key=question.trim().toLowerCase();
+ if(session.cache.has(key))return {...session.cache.get(key),cache:'hit'};
+ const evidence=retrieve(session.graph,question);
+ if(!evidence.length)return {answer:'Insufficient evidence in this uploaded codebase.',citations:[],cache:'miss',mode:'no-evidence'};
+ const output=await explain(question,evidence);
+ const result={...output,citations:evidence.map(({path,start,end})=>({path,start,end})),cache:'miss'};
+ if(session.cache.size>=50)session.cache.delete(session.cache.keys().next().value);
+ session.cache.set(key,result);return result;
+}
+async function readBody(req,limit){
+ const chunks=[];let length=0;
+ for await(const chunk of req){length+=chunk.length;if(length>limit)throw Error('Upload/request too large');chunks.push(chunk)}
+ return Buffer.concat(chunks);
+}
+function send(res,status,data){res.writeHead(status,{'content-type':'application/json','cache-control':'no-store'});res.end(JSON.stringify(data))}
+function getSession(req){
+ const id=req.headers['x-session-id'];const s=typeof id==='string'?sessions.get(id):null;
+ if(!s||s.expires<Date.now())throw Error('Session missing or expired');
+ s.expires=Date.now()+TTL;return s;
+}
+export async function handler(req,res){
+ res.setHeader('access-control-allow-origin',process.env.UI_ORIGIN||'http://127.0.0.1:5173');
+ res.setHeader('access-control-allow-headers','content-type,x-session-id');
+ res.setHeader('access-control-allow-methods','GET,POST,DELETE,OPTIONS');
+ if(req.method==='OPTIONS')return send(res,200,{});
+ try{
+  clean();
+  if(req.method==='GET'&&req.url==='/api/health')return send(res,200,{status:'ok'});
+  if(req.method==='POST'&&req.url==='/api/session/upload'){
+   if(sessions.size>=MAX_SESSIONS)throw Error('Session capacity reached');
+   if(req.headers['content-type']!=='application/zip')throw Error('Expected application/zip');
+   const bytes=await readBody(req,MAX_ZIP);
+   const files=parseArchive(bytes),graph=buildGraph(files);
+   const id=randomUUID()+randomUUID();
+   sessions.set(id,{graph,cache:new Map(),expires:Date.now()+TTL});
+   return send(res,200,{sessionId:id,filesIndexed:graph.docs.length,symbolsIndexed:graph.symbols.length,edgesIndexed:graph.edges.length,ttlSeconds:TTL/1000});
   }
-  return output;
-}
-export async function buildIndex() {
-  const files=[];
-  for (const absolute of await collect(root)) {
-    const content=await fs.readFile(absolute,'utf8');
-    const relative=path.relative(root,absolute).split(path.sep).join('/');
-    const lines=content.split('\n');
-    const symbols=[];
-    for (let i=0;i<lines.length;i++) {
-      const m=lines[i].match(/\b(?:function|class|interface|type|const|let|var)\s+([A-Za-z_$][\w$]*)/);
-      if(m) symbols.push({name:m[1],line:i+1});
-    }
-    const imports=[...content.matchAll(/(?:import\s+(?:[\s\S]*?\s+from\s+)?|require\s*\()['"]([^'"\n]+)['"]/g)].map(m=>m[1]);
-    files.push({path:relative,content,lines,symbols,imports});
+  if(req.method==='GET'&&req.url==='/api/graph'){
+   const s=getSession(req);
+   return send(res,200,{files:s.graph.docs.map(d=>d.path),symbols:s.graph.symbols.slice(0,200),edges:s.graph.edges.slice(0,300)});
   }
-  const revision=hash(files.map(f=>f.path+'\0'+f.content).join('\0'));
-  index={files,revision};cache.clear();
-  return {revision,filesIndexed:files.length,symbolsIndexed:files.reduce((n,f)=>n+f.symbols.length,0)};
+  if(req.method==='POST'&&req.url==='/api/chat'){
+   const s=getSession(req);const data=JSON.parse((await readBody(req,4096)).toString('utf8'));
+   return send(res,200,await ask(s,data.question));
+  }
+  if(req.method==='DELETE'&&req.url==='/api/session'){
+   getSession(req);sessions.delete(req.headers['x-session-id']);return send(res,200,{ended:true});
+  }
+  return send(res,404,{error:'Not found'});
+ }catch(e){return send(res,400,{error:e.message})}
 }
-export function retrieve(question, idx=index) {
-  if (!idx) throw new Error('Repository not indexed');
-  const terms=words(question);
-  return idx.files.map(f=>{
-    const hits=f.symbols.filter(s=>terms.includes(s.name.toLowerCase()));
-    const lines=f.lines.map((line,i)=>({line,i:i+1,score:words(line).filter(w=>terms.includes(w)).length})).filter(x=>x.score>0);
-    const score=hits.length*8+lines.reduce((n,x)=>n+x.score,0)+terms.filter(w=>f.path.toLowerCase().includes(w)).length*3;
-    const focus=hits[0]?.line ?? lines.sort((a,b)=>b.score-a.score)[0]?.i ?? 1;
-    const start=Math.max(1,focus-5),end=Math.min(f.lines.length,focus+15);
-    return {path:f.path,start,end,score,source:f.lines.slice(start-1,end).map((s,i)=>`${start+i}: ${s}`).join('\n'),imports:f.imports};
-  }).filter(x=>x.score>0).sort((a,b)=>b.score-a.score).slice(0,5);
-}
-async function generate(question,evidence) {
-  const endpoint=process.env.LLM_BASE_URL;
-  if (!endpoint || !process.env.LLM_API_KEY || !process.env.LLM_MODEL) return {answer:'LLM is not configured. Relevant source evidence is listed below.',mode:'retrieval-only'};
-  const context=evidence.map(x=>`FILE ${x.path} LINES ${x.start}-${x.end}\n${x.source}`).join('\n\n').slice(0,MAX_CONTEXT);
-  const response=await fetch(`${endpoint.replace(/\/$/,'')}/chat/completions`,{method:'POST',headers:{'content-type':'application/json',authorization:`Bearer ${process.env.LLM_API_KEY}`},body:JSON.stringify({model:process.env.LLM_MODEL,temperature:0,messages:[{role:'system',content:'Explain only the provided code. Do not invent files, line numbers or behavior. If evidence is insufficient, say so. Citations are supplied separately by the server.'},{role:'user',content:`Question: ${question}\n\nEvidence:\n${context}`}],max_tokens:600}),signal:AbortSignal.timeout(30000)});
-  if(!response.ok) throw new Error(`LLM returned HTTP ${response.status}`);
-  const data=await response.json();
-  return {answer:data.choices?.[0]?.message?.content || 'No explanation returned.',mode:'llm'};
-}
-export async function ask(question) {
-  if(typeof question!=='string'||!question.trim()||question.length>1000) throw new Error('Question must be 1–1000 characters');
-  if(!index) throw new Error('Repository not indexed');
-  const key=hash(index.revision+'\0'+question.trim().toLowerCase());
-  const cached=cache.get(key);if(cached && cached.expires>Date.now()) return {...cached.result,cache:'hit'};
-  const evidence=retrieve(question);
-  if(!evidence.length) return {answer:'Insufficient evidence in the indexed repository.',citations:[],cache:'miss',mode:'no-evidence'};
-  const output=await generate(question,evidence);
-  const result={...output,citations:evidence.map(({path,start,end})=>({path,start,end})),cache:'miss'};
-  if(cache.size>=100) cache.delete(cache.keys().next().value);
-  cache.set(key,{result,expires:Date.now()+10*60_000});return result;
-}
-async function handler(req,res){
-  res.setHeader('access-control-allow-origin',process.env.UI_ORIGIN || 'http://localhost:5173');
-  res.setHeader('access-control-allow-methods','GET,POST,OPTIONS');res.setHeader('access-control-allow-headers','content-type');
-  res.setHeader('content-type','application/json');
-  if(req.method==='OPTIONS'){res.writeHead(204);return res.end();}
-  try {
-    if(req.method==='GET'&&req.url==='/api/health') return res.end(JSON.stringify({status:'ok',indexed:!!index}));
-    if(req.method==='POST'&&req.url==='/api/repository/index') return res.end(JSON.stringify(await buildIndex()));
-    if(req.method==='POST'&&req.url==='/api/chat') {
-      let body='';for await(const part of req){body+=part;if(body.length>4096) throw new Error('Request too large');}
-      return res.end(JSON.stringify(await ask(JSON.parse(body).question)));
-    }
-    res.writeHead(404);res.end(JSON.stringify({error:'Not found'}));
-  } catch(error){res.writeHead(400);res.end(JSON.stringify({error:error.message}));}
-}
-if(process.argv[1] && path.resolve(process.argv[1])===path.resolve(new URL(import.meta.url).pathname)) http.createServer(handler).listen(port,'127.0.0.1',()=>console.log(`API http://127.0.0.1:${port} root=${root}`));
+if(process.argv[1]&&import.meta.url===new URL('file://'+process.argv[1]).href)
+ http.createServer(handler).listen(port,'127.0.0.1',()=>console.log('API on '+port));
