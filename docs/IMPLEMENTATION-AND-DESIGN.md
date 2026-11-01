@@ -130,3 +130,24 @@ For AWS, GCP or Azure: object storage with short retention for uploads, sandboxe
 - **Deliberate omissions:** no persistent graph/vector DB, orchestration framework, authentication or CI setup for the prototype.
 - **With more time:** real AST-based CodeGraph, multi-language parsing, hybrid retrieval, semantic equivalence evaluation, stronger citations, asynchronous indexing, sandboxing, session cleanup tests and a browser demo recording.
 - **AI-assisted work:** AI-generated scaffolding and architecture must be reviewed against source behavior; the final proof is an execution gate, not a claim of automatic correctness.
+
+## 11. Verification automation and graph explorer (current increment)
+
+The assignment's single final proof is automated in `.github/workflows/final-proof.yml`. It installs the existing dependencies, runs `node --check` for backend syntax, executes the backend proof tests, and builds the React UI. These checks are not equivalent to a browser acceptance test or a live LLM proof. GitHub Actions status must be inspected before reporting PASS.
+
+The session-only `GET /api/graph` endpoint returns bounded file names, symbol records and relationship records to the UI (up to 200 symbols and 300 edges). React renders a compact explorer with symbol locations and relationship descriptions. This is a text-based graph inspection panel, not an interactive graph visualization or a compiler-resolved CodeGraph. The session token is required for the endpoint. Data is not persisted and is deleted with the session.
+
+```mermaid
+flowchart LR
+ ZIP[Uploaded ZIP] --> Index[Session CodeGraph]
+ Index --> Symbols[Symbols + line numbers]
+ Index --> Edges[Possible calls + imports]
+ Symbols --> Explorer[React graph explorer]
+ Edges --> Explorer
+ Index --> Retrieval[Evidence retrieval]
+ Retrieval --> Answer[Chat answer and citations]
+```
+
+**Verification contract:** The final proof must demonstrate ZIP upload, symbol and relationship extraction, source-grounded chat, repeat-request cache hit, explicit session deletion and rejection of the old session. The CI job tests the HTTP lifecycle without requiring an external model. A separate manual demo must prove that an actual LLM explanation works if an LLM is configured.
+
+**Tradeoff:** This remains heuristic extraction. Accurate cross-file call resolution, AST traversal, graph traversal ranking, embeddings and semantic cache are outside this increment. Reusing an existing CodeSight parser remains a future evaluation, not a claim of implemented integration.
