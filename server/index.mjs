@@ -93,7 +93,11 @@ function getSession(req){
  s.expires=Date.now()+TTL;return s;
 }
 export async function handler(req,res){
- res.setHeader('access-control-allow-origin',process.env.UI_ORIGIN||'http://127.0.0.1:5173');
+ const allowedOrigin=process.env.UI_ORIGIN||'http://127.0.0.1:5173';
+ const origin=req.headers.origin;
+ if(origin&&origin!==allowedOrigin)return send(res,403,{error:'Origin not allowed'});
+ res.setHeader('access-control-allow-origin',allowedOrigin);
+ res.setHeader('vary','Origin');
  res.setHeader('access-control-allow-headers','content-type,x-session-id');
  res.setHeader('access-control-allow-methods','GET,POST,DELETE,OPTIONS');
  if(req.method==='OPTIONS')return send(res,200,{});
@@ -116,6 +120,7 @@ export async function handler(req,res){
   }
   if(req.method==='POST'&&req.url==='/api/chat'){
    const s=getSession(req);const data=JSON.parse((await readBody(req,4096)).toString('utf8'));
+   if(!data||typeof data!=='object')throw Error('Invalid request body');
    return send(res,200,await ask(s,data.question));
   }
   if(req.method==='DELETE'&&req.url==='/api/session'){
